@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="id"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pembuat Soal AI</title>
+<script src="https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+<style>
+body{font-family:sans-serif;max-width:720px;margin:auto;padding:16px}
+label{display:block;margin:10px 0 4px;font-weight:600}
+input,select{width:100%;padding:8px;box-sizing:border-box}
+.row{display:flex;gap:8px}.row div{flex:1}
+button{padding:10px 16px;margin:12px 6px 0 0;font-size:16px}
+#prev{margin-top:16px;line-height:1.5}
+</style></head><body>
+<h2>Pembuat Soal AI</h2>
+<label>API Key Anthropic</label><input id="key" type="password">
+<label>Judul / Mata Pelajaran</label><input id="judul" placeholder="Ujian Fiqih Kelas 7">
+<label>File materi (PDF, DOCX, TXT)</label>
+<input id="file" type="file" accept=".pdf,.docx,.txt" multiple>
+<label>Template Kisi-kisi / Kunci / AK (opsional, PDF, DOCX, TXT)</label>
+<input id="tpl" type="file" accept=".pdf,.docx,.txt">
+<div class="row">
+ <div><label>Jumlah PG</label><input id="npg" type="number" value="10" min="0"></div>
+ <div><label>Benar/Salah</label><input id="nbs" type="number" value="5" min="0"></div>
+ <div><label>Essai</label><input id="nes" type="number" value="3" min="0"></div>
+</div>
+<div class="row">
+ <div><label>Tingkat</label><select id="lvl"><option>mudah</option><option selected>sedang</option><option>sulit</option></select></div>
+ <div><label>Bahasa soal</label><select id="lang"><option>Indonesia</option><option>Arab</option><option>Inggris</option></select></div>
+</div>
+<button id="go">Buat Soal</button><button id="dl" disabled>Unduh Word (4 file)</button>
+<p id="st"></p><div id="prev"></div>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+const $=id=>document.getElementById(id);
+let data=null;
+$('key').value=localStorage.getItem('k')||'';
+
+async function readFile(f){
+  const n=f.name.toLowerCase();
+  if(n.endsWith('.txt')) return f.text();
+  const buf=await f.arrayBuffer();
+  if(n.endsWith('.docx')) return (await mammoth.extractRawText({arrayBuffer:buf})).value;
+  if(n.endsWith('.pdf')){
+    const pdf=await pdfjsLib.getDocument({data:buf}).promise; let t='';
+    for(let i=1;i<=pdf.numPages;i++){
+      const c=await (await pdf.getPage(i)).getTextContent();
+      t+=c.items.map(x=>x.str).join(' ')+'\n';
+    }
+    return t;
+  }
+  return '';
+}
+
+$('go').onclick=async()=>{
+  const key=$('key').value.trim();
+  if(!key||!$('file').files.length){$('st').textContent='Isi API key dan pilih file materi.';return;}
+  localStorage.setItem('k',key);
+  $('st').textContent='Membaca materi...';$('dl').disabled=true;
+  try{
+    let materi='';
+    for(const f of $('file').files) materi+=await readFile(f)+'\n';
+    materi=materi.slice(0,60000);
+    const tpl=$('tpl').files.length?(await readFile($('tpl').files[0])).slice(0,20000):'';
+    const prompt=`Buat soal ujian HANYA berdasarkan materi berikut. Jangan memakai pengetahuan di luar materi.
+Jumlah: ${$('npg').value} pilihan ganda (4 opsi, 1 jawaban benar), ${$('nbs').value} benar/salah, ${$('nes').value} essai.
+Tingkat kesulitan: ${$('lvl').value}. Bahasa soal: ${$('lang').value}.
+Setiap soal wajib punya "ind" (indikator soal) dan "lvl" (level kognitif C1-C6).
+Buat juga "kisi" (kisi-kisi) dan "ak" (analisis kualitatif) berupa tabel {"cols":[nama kolom],"rows":[[isi tiap kolom]]}, satu baris per soal (PG, lalu B/S, lalu essai). Isi tabel berbahasa ${$('lang').value}.
+${tpl?`Kolom, urutan kolom, dan istilah kisi-kisi serta AK HARUS mengikuti TEMPLATE berikut.\nTEMPLATE:\n${tpl}`:'Tanpa template, kolom kisi-kisi: No, Materi, Indikator Soal, Level Kognitif, Bentuk Soal, No. Soal. Kolom AK: No. Soal, Materi, Konstruksi, Bahasa, Keterangan (isi Ya/Tidak dan catatan singkat).'}
+Untuk essai, "key" berisi kunci jawaban beserta rubrik skor singkat.
+Balas HANYA JSON valid tanpa teks lain, format:
+{"pg":[{"q":"","options":["","","",""],"answer":"A","ind":"","lvl":""}],"bs":[{"q":"","answer":true,"ind":"","lvl":""}],"essay":[{"q":"","key":"","ind":"","lvl":""}],"kisi":{"cols":[],"rows":[[]]},"ak":{"cols":[],"rows":[[]]}}
+Opsi ditulis tanpa awalan huruf. Variasikan posisi jawaban benar.
+MATERI:
+${materi}`;
+    $('st').textContent='AI sedang membuat soal...';
+    const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
+      headers:{'content-type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body:JSON.stringify({model:'claude-sonnet-5-5',max_tokens:16000,messages:[{role:'user',content:prompt}]})});
+    const j=await r.json();
+    if(!r.ok) throw new Error(j.error?.message||'Gagal memanggil API');
+    const t=j.content[0].text;
+    data=JSON.parse(t.slice(t.indexOf('{'),t.lastIndexOf('}')+1));
+    render();$('dl').disabled=false;$('st').textContent='Selesai. Periksa lalu unduh.';
+  }catch(e){$('st').textContent='Error: '+e.message;}
+};
+
+function render(){
+  let h='<h3>A. Pilihan Ganda</h3>';
+  data.pg.forEach((s,i)=>h+=`<p><b>${i+1}.</b> ${s.q}<br>${s.options.map((o,k)=>'ABCD'[k]+'. '+o).join('<br>')}</p>`);
+  h+='<h3>B. Benar/Salah</h3>';
+  data.bs.forEach((s,i)=>h+=`<p><b>${i+1}.</b> ${s.q}</p>`);
+  h+='<h3>C. Essai</h3>';
+  data.essay.forEach((s,i)=>h+=`<p><b>${i+1}.</b> ${s.q}</p>`);
+  $('prev').innerHTML=h;
+}
+
+$('dl').onclick=async()=>{
+  const {Document,Packer,Paragraph,TextRun,AlignmentType,Footer,PageNumber,SectionType,PageOrientation,Table,TableRow,TableCell,WidthType}=docx;
+  const lang=$('lang').value, isAr=lang==='Arab';
+  const name=$('judul').value||'soal';
+  const T={
+    Indonesia:{opt:['A','B','C','D'],pg:'A. PILIHAN GANDA',bs:'B. BENAR / SALAH',es:'C. ESSAI',
+      info:'Tulis B jika pernyataan benar, S jika salah.',key:'KUNCI JAWABAN',kpg:'A. Pilihan Ganda: ',kbs:'B. Benar/Salah: ',kes:'C. Essai:',
+      kisi:'KISI-KISI SOAL',ak:'ANALISIS KUALITATIF (AK)',
+      t:'B',f:'S',page:'Halaman',head:'Nama : ..............................   Kelas : ........   Tanggal : ..............'},
+    Arab:{opt:['أ','ب','ج','د'],pg:'أ. اختيار من متعدد',bs:'ب. صح / خطأ',es:'ج. أسئلة مقالية',
+      info:'اكتب (ص) إذا كانت العبارة صحيحة، و(خ) إذا كانت خاطئة.',key:'مفتاح الإجابة',kpg:'أ. اختيار من متعدد: ',kbs:'ب. صح / خطأ: ',kes:'ج. أسئلة مقالية:',
+      kisi:'جدول مواصفات الاختبار',ak:'التحليل النوعي',
+      t:'ص',f:'خ',page:'صفحة',head:'الاسم : ..............................   الفصل : ........   التاريخ : ..............'},
+    Inggris:{opt:['A','B','C','D'],pg:'A. MULTIPLE CHOICE',bs:'B. TRUE / FALSE',es:'C. ESSAY',
+      info:'Write T if the statement is true, F if false.',key:'ANSWER KEY',kpg:'A. Multiple Choice: ',kbs:'B. True/False: ',kes:'C. Essay:',
+      kisi:'TEST BLUEPRINT',ak:'QUALITATIVE ANALYSIS',
+      t:'T',f:'F',page:'Page',head:'Name : ..............................   Class : ........   Date : ..............'}
+  }[lang];
+  const n=x=>isAr?String(x).replace(/\d/g,d=>'٠١٢٣٤٥٦٧٨٩'[d]):String(x);
+  const ar=s=>isAr||/[\u0600-\u06FF]/.test(s);
+  const FONT='Times New Roman';
+  const P=(t,o={})=>new Paragraph({
+    bidirectional:ar(t),
+    alignment:o.align||(ar(t)?undefined:AlignmentType.LEFT),
+    spacing:{after:o.after??80},
+    indent:o.indent,
+    children:[new TextRun({text:t,bold:o.bold,rightToLeft:ar(t),font:FONT,size:o.size||24})]
+  });
+  const footer=(txt)=>new Footer({children:[new Paragraph({
+    alignment:AlignmentType.CENTER,
+    children:[
+      new TextRun({text:txt+'  |  '+T.page+' ',font:FONT,size:20,rightToLeft:isAr}),
+      new TextRun({children:[PageNumber.CURRENT],font:FONT,size:20})
+    ]})]});
+  // A4 portrait, tepi Narrow (720 twip = 1,27 cm)
+  const page={size:{width:11906,height:16838,orientation:PageOrientation.PORTRAIT},
+              margin:{top:720,bottom:720,left:720,right:720,header:360,footer:360}};
+
+  const tbl=(t)=>{
+    const cols=t.cols||[], rows=t.rows||[];
+    const W=10466, w=Math.floor(W/Math.max(cols.length,1));
+    const cell=(x,b)=>new TableCell({width:{size:w,type:WidthType.DXA},margins:{top:40,bottom:40,left:80,right:80},
+      children:[P(String(x??''),{bold:b,size:20,after:0})]});
+    return new Table({width:{size:W,type:WidthType.DXA},columnWidths:cols.map(()=>w),rows:[
+      new TableRow({tableHeader:true,children:cols.map(c=>cell(c,true))}),
+      ...rows.map(r=>new TableRow({children:cols.map((_,i)=>cell(r[i]))}))
+    ]});
+  };
+
+  // simpan satu file Word; footer = nama file
+  const save=async(label,secs)=>{
+    const fname=`${name} - ${label}`;
+    const doc=new Document({sections:secs.map(s=>({
+      properties:{page,...(s.extra||{})},footers:{default:footer(fname)},children:s.children
+    }))});
+    const blob=await Packer.toBlob(doc);
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+    a.download=fname+'.docx';a.click();
+    await new Promise(r=>setTimeout(r,700));
+  };
+  const title=(t)=>[P(t,{bold:true,align:AlignmentType.CENTER,size:28,after:60}),
+                    P(name,{align:AlignmentType.CENTER,after:160})];
+
+  // ===== 1. SOAL =====
+  const c1=[];
+  c1.push(P(name,{bold:true,align:AlignmentType.CENTER,size:28,after:120}));
+  c1.push(P(T.head,{after:200}));
+  c1.push(P(T.pg,{bold:true,after:120}));
+  data.pg.forEach((s,i)=>{
+    c1.push(P(`${n(i+1)}. ${s.q}`,{after:40}));
+    s.options.forEach((o,k)=>c1.push(P(`${T.opt[k]}. ${o}`,{indent:{start:500},after:20})));
+    c1.push(P('',{after:60}));
+  });
+  c1.push(P(T.bs,{bold:true,after:120}));
+  c1.push(P(T.info,{after:80}));
+  const c2=data.bs.map((s,i)=>P(`${n(i+1)}. ( ... ) ${s.q}`,{after:100}));
+  const c3=[P(T.es,{bold:true,after:120})];
+  data.essay.forEach((s,i)=>c3.push(P(`${n(i+1)}. ${s.q}`,{after:240})));
+  await save('Soal',[
+    {children:c1},
+    {children:c2,extra:{type:SectionType.CONTINUOUS,column:{count:2,space:480,separate:true}}},
+    {children:c3,extra:{type:SectionType.CONTINUOUS,column:{count:1}}}
+  ]);
+
+  // ===== 2. KISI-KISI =====
+  const c5=title(T.kisi);
+  if(data.kisi) c5.push(tbl(data.kisi));
+  c5.push(P(''));
+  await save('Kisi-kisi',[{children:c5}]);
+
+  // ===== 3. KUNCI JAWABAN =====
+  const c4=title(T.key);
+  c4.push(P(T.kpg+data.pg.map((s,i)=>`${n(i+1)}${T.opt['ABCD'.indexOf(s.answer)]||s.answer}`).join('، ')));
+  c4.push(P(T.kbs+data.bs.map((s,i)=>`${n(i+1)}${s.answer?T.t:T.f}`).join('، ')));
+  c4.push(P(T.kes,{bold:true}));
+  data.essay.forEach((s,i)=>c4.push(P(`${n(i+1)}. ${s.key}`)));
+  await save('Kunci Jawaban',[{children:c4}]);
+
+  // ===== 4. AK =====
+  const c6=title(T.ak);
+  if(data.ak) c6.push(tbl(data.ak));
+  c6.push(P(''));
+  await save('AK',[{children:c6}]);
+};
+</script></body></html>
